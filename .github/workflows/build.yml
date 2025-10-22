@@ -126,6 +126,83 @@ jobs:
             dist/xlsx-trimmer-linux-x86_64-musl.zip
             dist/SHA256SUMS.txt
 
+  # --- 3) Build GNU/glibc binary on a manylinux image (max compatibility with older glibc like QNAP 2.21) ---
+  build-qnap-glibc:
+    name: Build QNAP (x86_64 GNU/glibc)
+    runs-on: ubuntu-latest
+    needs: [test-native]
+    # run inside a manylinux2014 container which uses an older glibc baseline (glibc 2.17)
+    container:
+      image: quay.io/pypa/manylinux2014_x86_64
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Cache Rust (in-container)
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install build deps
+        run: |
+          set -eux
+          # manylinux images are minimal; install cmake and core build tools if missing
+          yum -y install make gcc gcc-c++ tar gzip || true
+
+      - name: Install Rust toolchain
+        run: |
+          set -eux
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          source $HOME/.cargo/env
+          rustup default stable
+          rustup component add clippy rustfmt || true
+          rustc -Vv && cargo -V
+
+      - name: Build (glibc-linked release)
+        env:
+          CARGO_TERM_COLOR: always
+        run: |
+          set -eux
+          source $HOME/.cargo/env
+          # default target in container is x86_64-unknown-linux-gnu
+          cargo build --release --verbose
+          ls -lah target/release/
+
+      - name: Strip binary (shrink size)
+        run: |
+          set -eux
+          source $HOME/.cargo/env
+          # strip may be available as strip
+          strip target/release/xlsx-trimmer || true
+
+      - name: Package artifacts (tar/zip + checksums)
+        run: |
+          set -eux
+          OUTDIR=dist-glibc
+          BIN=target/release/xlsx-trimmer
+          mkdir -p "$OUTDIR"
+          cp "$BIN" "$OUTDIR/xlsx-trimmer"
+          chmod +x "$OUTDIR/xlsx-trimmer"
+
+          # Tar.gz (Linux deploy)
+          tar -C "$OUTDIR" -czf "$OUTDIR/xlsx-trimmer-linux-x86_64-gnu.tar.gz" xlsx-trimmer
+
+          # Zip variant (optional)
+          (cd "$OUTDIR" && zip -q xlsx-trimmer-linux-x86_64-gnu.zip xlsx-trimmer) || true
+
+          # Checksums
+          (cd "$OUTDIR" && sha256sum xlsx-trimmer xlsx-trimmer-*.tar.gz xlsx-trimmer-*.zip > SHA256SUMS.txt) || true
+
+          ls -lah "$OUTDIR"
+
+      - name: Upload GNU/glibc artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: xlsx-trimmer-linux-x86_64-gnu
+          path: |
+            dist-glibc/xlsx-trimmer
+            dist-glibc/xlsx-trimmer-linux-x86_64-gnu.tar.gz
+            dist-glibc/xlsx-trimmer-linux-x86_64-gnu.zip
+            dist-glibc/SHA256SUMS.txt
+
   # --- 3) Optional: create a GitHub Release on tag push and attach artifacts ---
   release:
     name: Publish GitHub Release
