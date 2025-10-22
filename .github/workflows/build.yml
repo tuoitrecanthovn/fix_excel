@@ -19,10 +19,9 @@ jobs:
       uses: actions/checkout@v4
 
     - name: Set up Rust toolchain
-      uses: actions/toolchain@v1
+      uses: dtolnay/rust-toolchain@stable
       with:
         toolchain: stable
-        profile: minimal
 
     - name: Build release
       run: cargo build --release --verbose
