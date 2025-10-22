@@ -1,0 +1,15 @@
+[package]
+name = "xlsx-trimmer"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+quick-xml = "0.38.3"
+zip = { version = "6.0.0", features = ["deflate"] }
+rayon = "1.10"
+regex = "1.10"
+tempfile = "3.10"
+anyhow = "1.0"
+walkdir = "2.5"
+thiserror = "2.0.17"
+memchr = "2.7"

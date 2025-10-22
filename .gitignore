@@ -1,0 +1,14 @@
+# Rust
+
+# Ignore build artifacts
+/target/
+
+# Ignore IDE configuration files
+.idea/
+.vscode/
+
+# Ignore OS-specific files
+.DS_Store
+
+# Ignore test data and output files
+*.xlsx
