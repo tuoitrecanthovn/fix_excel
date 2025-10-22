@@ -3,28 +3,61 @@ name: Build Project
 on:
   push:
     branches: [ main ]
+    tags:
+      - "v*.*.*"   # create a GitHub Release when you push a semver tag
   pull_request:
     branches: [ main ]
 
+permissions:
+  contents: write  # needed for release upload in the release job
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
+  # --- 1) Build & Test on native runners (debugging & CI sanity) ---
   test-native:
-    name: Test on ${{ matrix.os }}
+    name: Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
     steps:
-      - uses: actions/checkout@v4
-      - uses: Swatinem/rust-cache@v2
-      - uses: dtolnay/rust-toolchain@stable
-      - run: cargo build --release --verbose
-      - run: cargo test --verbose
-      - name: Upload native Linux (for debugging)
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+
+      - name: Toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Show toolchain
+        run: rustc -Vv && cargo -V
+
+      - name: Clippy (warnings as errors)
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Build (host)
+        run: cargo build --release --verbose
+
+      - name: Test
+        run: cargo test --verbose
+
+      - name: Upload native Linux binary
         if: matrix.os == 'ubuntu-latest'
         uses: actions/upload-artifact@v4
         with:
           name: xlsx-trimmer-linux-host
           path: target/release/xlsx-trimmer
+
       - name: Upload Windows exe
         if: matrix.os == 'windows-latest'
         uses: actions/upload-artifact@v4
@@ -32,30 +65,88 @@ jobs:
           name: xlsx-trimmer-windows
           path: target/release/xlsx-trimmer.exe
 
+  # --- 2) Produce QNAP-ready static x86_64 MUSL binary + packages ---
   build-qnap-musl:
-    name: Build QNAP (static MUSL)
+    name: Build QNAP (x86_64 MUSL static)
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        target: [x86_64-unknown-linux-musl, aarch64-unknown-linux-musl] # add armv7-unknown-linux-musleabihf if needed
+    needs: [test-native]
     steps:
-      - uses: actions/checkout@v4
-      - uses: Swatinem/rust-cache@v2
-      - name: Set up Rust (targets)
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+
+      - name: Toolchain (musl target)
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.target }}
-      - name: Build static MUSL
+          targets: x86_64-unknown-linux-musl
+
+      - name: Build static (musl)
         env:
           RUSTFLAGS: "-C target-feature=+crt-static"
         run: |
-          cargo build --release --target ${{ matrix.target }} --verbose
-          # Trim size (ignore if tool absent)
-          sudo apt-get update && sudo apt-get install -y binutils || true
-          strip target/${{ matrix.target }}/release/xlsx-trimmer || true
-          chmod +x target/${{ matrix.target }}/release/xlsx-trimmer
-      - name: Upload artifact
+          set -eux
+          cargo build --release --target x86_64-unknown-linux-musl --verbose
+          ls -lah target/x86_64-unknown-linux-musl/release/
+
+      - name: Strip binary (shrink size)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y binutils
+          strip target/x86_64-unknown-linux-musl/release/xlsx-trimmer || true
+
+      - name: Package artifacts (tar/zip + checksums)
+        run: |
+          set -eux
+          OUTDIR=dist
+          BIN=target/x86_64-unknown-linux-musl/release/xlsx-trimmer
+          mkdir -p "$OUTDIR"
+          cp "$BIN" "$OUTDIR/xlsx-trimmer"
+          chmod +x "$OUTDIR/xlsx-trimmer"
+
+          # Tar.gz (Linux deploy)
+          tar -C "$OUTDIR" -czf "$OUTDIR/xlsx-trimmer-linux-x86_64-musl.tar.gz" xlsx-trimmer
+
+          # Zip variant (optional)
+          (cd "$OUTDIR" && zip -q xlsx-trimmer-linux-x86_64-musl.zip xlsx-trimmer)
+
+          # Checksums
+          (cd "$OUTDIR" && sha256sum xlsx-trimmer xlsx-trimmer-*.tar.gz xlsx-trimmer-*.zip > SHA256SUMS.txt)
+
+          ls -lah "$OUTDIR"
+
+      - name: Upload MUSL artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: xlsx-trimmer-${{ matrix.target }}
-          path: target/${{ matrix.target }}/release/xlsx-trimmer
+          name: xlsx-trimmer-linux-x86_64-musl
+          path: |
+            dist/xlsx-trimmer
+            dist/xlsx-trimmer-linux-x86_64-musl.tar.gz
+            dist/xlsx-trimmer-linux-x86_64-musl.zip
+            dist/SHA256SUMS.txt
+
+  # --- 3) Optional: create a GitHub Release on tag push and attach artifacts ---
+  release:
+    name: Publish GitHub Release
+    runs-on: ubuntu-latest
+    needs: [build-qnap-musl]
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release_artifacts
+
+      - name: List downloaded
+        run: find release_artifacts -type f -maxdepth 3 -print
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            release_artifacts/**/xlsx-trimmer
+            release_artifacts/**/xlsx-trimmer-*.tar.gz
+            release_artifacts/**/xlsx-trimmer-*.zip
+            release_artifacts/**/SHA256SUMS.txt
