@@ -1,4 +1,4 @@
-name: Build Project
+name: Build Project (QNAP compatible)
 
 on:
   push:
@@ -65,7 +65,88 @@ jobs:
           name: xlsx-trimmer-windows
           path: target/release/xlsx-trimmer.exe
 
-  # --- 2) Produce QNAP-ready static x86_64 MUSL binary + packages ---
+  # --- 2A) QNAP-compatible GLIBC (dynamic) build in manylinux2014 (GLIBC 2.17) ---
+  build-qnap-glibc:
+    name: Build QNAP (x86_64 GNU/glibc ≤ 2.21 compatible)
+    runs-on: ubuntu-latest
+    needs: [test-native]
+    # Build inside manylinux2014 to ensure we link against an old-enough GLIBC (2.17),
+    # which will run on QNAP boxes with ldd (GNU libc) 2.21.
+    container:
+      image: quay.io/pypa/manylinux2014_x86_64:latest
+      options: --cpus 2
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain in container
+        run: |
+          set -eux
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+          echo 'source $HOME/.cargo/env' >> $GITHUB_ENV
+      - name: Show toolchain
+        shell: bash
+        run: |
+          source $HOME/.cargo/env
+          rustc -Vv && cargo -V
+          ldd --version | head -n1
+
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build (glibc dynlink, x86_64-unknown-linux-gnu)
+        shell: bash
+        run: |
+          set -eux
+          source $HOME/.cargo/env
+          # Default target in this container is x86_64-unknown-linux-gnu (glibc)
+          cargo build --release --target x86_64-unknown-linux-gnu --verbose
+          ls -lah target/x86_64-unknown-linux-gnu/release/
+
+      - name: Verify GLIBC symbol versions used
+        shell: bash
+        run: |
+          set -eux
+          BIN=target/x86_64-unknown-linux-gnu/release/xlsx-trimmer
+          # List referenced GLIBC symbol versions; should be <= GLIBC_2.17
+          objdump -T "$BIN" | awk '/GLIBC_[0-9]/ {print $NF}' | sort -Vu || true
+
+      - name: Strip binary (shrink size)
+        run: |
+          strip target/x86_64-unknown-linux-gnu/release/xlsx-trimmer || true
+
+      - name: Package artifacts (tar/zip + checksums)
+        shell: bash
+        run: |
+          set -eux
+          OUTDIR=dist
+          BIN=target/x86_64-unknown-linux-gnu/release/xlsx-trimmer
+          mkdir -p "$OUTDIR"
+          cp "$BIN" "$OUTDIR/xlsx-trimmer"
+          chmod +x "$OUTDIR/xlsx-trimmer"
+
+          # Tar.gz (Linux deploy)
+          tar -C "$OUTDIR" -czf "$OUTDIR/xlsx-trimmer-linux-x86_64-glibc.tar.gz" xlsx-trimmer
+
+          # Zip variant (optional)
+          (cd "$OUTDIR" && zip -q xlsx-trimmer-linux-x86_64-glibc.zip xlsx-trimmer)
+
+          # Checksums
+          (cd "$OUTDIR" && sha256sum xlsx-trimmer xlsx-trimmer-*.tar.gz xlsx-trimmer-*.zip > SHA256SUMS.txt)
+
+          ls -lah "$OUTDIR"
+
+      - name: Upload GLIBC artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: xlsx-trimmer-linux-x86_64-glibc-compat
+          path: |
+            dist/xlsx-trimmer
+            dist/xlsx-trimmer-linux-x86_64-glibc.tar.gz
+            dist/xlsx-trimmer-linux-x86_64-glibc.zip
+            dist/SHA256SUMS.txt
+
+  # --- 2B) Optional: also produce a MUSL static binary as a portable fallback ---
   build-qnap-musl:
     name: Build QNAP (x86_64 MUSL static)
     runs-on: ubuntu-latest
@@ -207,7 +288,7 @@ jobs:
   release:
     name: Publish GitHub Release
     runs-on: ubuntu-latest
-    needs: [build-qnap-musl]
+    needs: [build-qnap-glibc, build-qnap-musl]
     if: startsWith(github.ref, 'refs/tags/v')
     steps:
       - name: Download all artifacts
